@@ -1,167 +1,302 @@
+"""Étape 1 du pipeline.
+
+Crée les tables PostgreSQL (`candidats`, `votants`, `votes`), génère des
+candidats et des votants synthétiques à partir de randomuser.me, puis publie
+les votants sur le sujet Kafka `voters_topic`.
+
+Usage :
+    python main.py
+
+Le nombre de votants se règle par la variable d'environnement `NB_VOTANTS`
+(voir `.env.example`).
+"""
+
+import json
+import logging
 import random
+import sys
+
 import psycopg2
 import requests
-from confluent_kafka import SerializingProducer
-import json
+from confluent_kafka import Producer
+from psycopg2.extras import execute_values
 
-BASE_URL = 'https://randomuser.me/api/?nat=gb'
-PARTIES = ["Partie de Gauche", "Partie de Droite", "Partie du Milieu"]
-random.seed(42)
+import config
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+journal = logging.getLogger("main")
+
+URL_RANDOMUSER = "https://randomuser.me/api/"
+DELAI_HTTP = 30  # secondes
+
+PARTIS = ["Parti de Gauche", "Parti de Droite", "Parti du Milieu"]
+
+# Les votants sont répartis sur les 45 départements du Sénégal. La région est
+# déduite du département : sans cette table, la région restait celle du profil
+# randomuser.me (un comté britannique), ce qui rendait l'agrégation
+# « participation par région » incohérente avec le reste des données.
+REGION_PAR_DEPARTEMENT = {
+    "Dakar": "Dakar", "Guédiawaye": "Dakar", "Pikine": "Dakar", "Rufisque": "Dakar",
+    "Bambey": "Diourbel", "Diourbel": "Diourbel", "Mbacké": "Diourbel",
+    "Fatick": "Fatick", "Foundiougne": "Fatick", "Gossas": "Fatick",
+    "Birkilane": "Kaffrine", "Kaffrine": "Kaffrine", "Koungheul": "Kaffrine",
+    "Malem Hodar": "Kaffrine",
+    "Guinguinéo": "Kaolack", "Kaolack": "Kaolack", "Nioro du Rip": "Kaolack",
+    "Kédougou": "Kédougou", "Salémata": "Kédougou", "Saraya": "Kédougou",
+    "Kolda": "Kolda", "Médina Yoro Foulah": "Kolda", "Vélingara": "Kolda",
+    "Kébémer": "Louga", "Linguère": "Louga", "Louga": "Louga",
+    "Kanel": "Matam", "Matam": "Matam", "Ranérou": "Matam",
+    "Dagana": "Saint-Louis", "Podor": "Saint-Louis", "Saint-Louis": "Saint-Louis",
+    "Bounkiling": "Sédhiou", "Goudomp": "Sédhiou", "Sédhiou": "Sédhiou",
+    "Bakel": "Tambacounda", "Goudiry": "Tambacounda", "Koumpentoum": "Tambacounda",
+    "Tambacounda": "Tambacounda",
+    "Mbour": "Thiès", "Thiès": "Thiès", "Tivaouane": "Thiès",
+    "Bignona": "Ziguinchor", "Oussouye": "Ziguinchor", "Ziguinchor": "Ziguinchor",
+}
+
+DEPARTEMENTS = list(REGION_PAR_DEPARTEMENT)
 
 
-def create_table(connexion, cursor):
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS candidats (
-            candidat_id VARCHAR(255) PRIMARY KEY,
-            candidat_nom VARCHAR(255),
-            partie VARCHAR(255),
-            biographie TEXT,
-            platforme_campagne TEXT,
-            url_photo TEXT
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS votants (
-            votant_id VARCHAR(255) PRIMARY KEY,
-            votant_nom VARCHAR(255),
-            date_naissance DATE,
-            genre VARCHAR(255),
-            nationalite VARCHAR(255),
-            numero_registre VARCHAR(255),
-            adresse_rue VARCHAR(255),
-            adresse_ville VARCHAR(255),
-            adresse_region VARCHAR(255),
-            adresse_pays VARCHAR(255),
-            adresse_postal VARCHAR(255),
-            email VARCHAR(255),
-            numero_tel VARCHAR(255),
-            photo TEXT,
-            age_enregistrer INTEGER
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS votes (
-            votant_id VARCHAR(255) UNIQUE,
-            candidat_id VARCHAR(255),
-            temps_vote TIMESTAMP,
-            vote INT DEFAULT 1,
-            PRIMARY KEY (votant_id, candidat_id)
-        )
-    """)
-
+def creer_tables(connexion):
+    """Crée les trois tables du schéma si elles n'existent pas."""
+    with connexion.cursor() as curseur:
+        curseur.execute("""
+            CREATE TABLE IF NOT EXISTS candidats (
+                candidat_id VARCHAR(255) PRIMARY KEY,
+                candidat_nom VARCHAR(255),
+                parti VARCHAR(255),
+                biographie TEXT,
+                plateforme_campagne TEXT,
+                url_photo TEXT
+            )
+        """)
+        curseur.execute("""
+            CREATE TABLE IF NOT EXISTS votants (
+                votant_id VARCHAR(255) PRIMARY KEY,
+                votant_nom VARCHAR(255),
+                date_naissance DATE,
+                genre VARCHAR(255),
+                nationalite VARCHAR(255),
+                numero_registre VARCHAR(255),
+                adresse_rue VARCHAR(255),
+                adresse_ville VARCHAR(255),
+                adresse_region VARCHAR(255),
+                adresse_pays VARCHAR(255),
+                adresse_postal VARCHAR(255),
+                email VARCHAR(255),
+                numero_tel VARCHAR(255),
+                photo TEXT,
+                age_enregistre INTEGER
+            )
+        """)
+        # `votant_id` seul est clé primaire : un votant ne vote qu'une fois.
+        # La version initiale déclarait une clé composite (votant_id,
+        # candidat_id) doublée d'un UNIQUE sur votant_id — la clé composite
+        # autorisait à elle seule le double vote pour deux candidats
+        # différents, ce qui arrive dès qu'un message Kafka est rejoué.
+        curseur.execute("""
+            CREATE TABLE IF NOT EXISTS votes (
+                votant_id VARCHAR(255) PRIMARY KEY
+                    REFERENCES votants(votant_id),
+                candidat_id VARCHAR(255) NOT NULL
+                    REFERENCES candidats(candidat_id),
+                temps_vote TIMESTAMP NOT NULL,
+                vote INT NOT NULL DEFAULT 1
+            )
+        """)
     connexion.commit()
 
-def generate_candidate_data(candidate_number, total_parties):
-    response = requests.get(BASE_URL + '&gender=' + ('female' if candidate_number % 2 == 1 else 'male'))
-    if response.status_code == 200:
-        user_data = response.json()['results'][0]
 
-        return {
-            "candidat_id": user_data['login']['uuid'],
-            "candidat_nom": f"{user_data['name']['first']} {user_data['name']['last']}",
-            "partie": PARTIES[candidate_number % total_parties],
-            "biographie": "Une brève biographie du candidat.",
-            "platforme_campagne": "Promesses ou plate-forme clés de la campagne.",
-            "url_photo": user_data['picture']['large']
-        }
-    else:
-        return "Erreur lors de la récupération des données 'Candidats'"
+def recuperer_profils(nombre):
+    """Récupère `nombre` profils sur randomuser.me, par lots.
 
-def generate_voter_data():
-    response = requests.get(BASE_URL)
-    if response.status_code == 200:
-        user_data = response.json()['results'][0]
-        return {
-            "votant_id": user_data['login']['uuid'],
-            "votant_nom": f"{user_data['name']['first']} {user_data['name']['last']}",
-            "date_naissance": user_data['dob']['date'],
-            "genre": user_data['gender'],
-            "nationalite": user_data['nat'],
-            "number_tel": user_data['login']['username'],
-            "address": {
-                "rue": f"{user_data['location']['street']['number']} {user_data['location']['street']['name']}",
-                "ville": user_data['location']['city'],
-                "region": user_data['location']['state'],
-                "pays": user_data['location']['country'],
-                "codePostal": user_data['location']['postcode']
-            },
-            "email": user_data['email'],
-            "phone_number": user_data['phone'],
-            "photo": user_data['picture']['large'],
-            "age": user_data['registered']['age']
-        }
-    else:
-        return "Erreur lors de la récupération des données 'votants'"
-
-def insert_voters(conn, cur, voter):
-    cur.execute("""
-                        INSERT INTO votants (votant_id, votant_nom, date_naissance, genre, nationalite, numero_registre, adresse_rue, adresse_ville, adresse_region, adresse_pays, adresse_postal, email, numero_tel, photo, age_enregistrer)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                (voter["votant_id"], voter['votant_nom'], voter['date_naissance'], voter['genre'],
-                 voter['nationalite'], voter['number_tel'], voter['address']['rue'],
-                 voter['address']['ville'], voter['address']['region'], voter['address']['pays'],
-                 voter['address']['codePostal'], voter['email'], voter['phone_number'], voter['photo'],
-                 voter['age']))
-    conn.commit()
+    Lève `requests.HTTPError` si l'API répond en erreur : mieux vaut échouer
+    franchement que retourner des données incomplètes sans le signaler.
+    """
+    profils = []
+    while len(profils) < nombre:
+        lot = min(config.TAILLE_LOT_PROFILS, nombre - len(profils))
+        reponse = requests.get(
+            URL_RANDOMUSER,
+            params={"nat": "gb", "results": lot},
+            timeout=DELAI_HTTP,
+        )
+        reponse.raise_for_status()
+        resultats = reponse.json().get("results", [])
+        if not resultats:
+            raise RuntimeError("randomuser.me a répondu sans aucun profil")
+        profils.extend(resultats)
+        journal.info("Profils récupérés : %d / %d", len(profils), nombre)
+    return profils[:nombre]
 
 
-def delivery_report(err, msg):
-    if err is not None:
-        print(f"Echec de l'envoi du message: {err}")
-    else:
-        print(f'Message envoyé a {msg.topic()} [{msg.partition()}]')
+def construire_candidat(profil, numero):
+    return {
+        "candidat_id": profil["login"]["uuid"],
+        "candidat_nom": f"{profil['name']['first']} {profil['name']['last']}",
+        "parti": PARTIS[numero % len(PARTIS)],
+        "biographie": "Une brève biographie du candidat.",
+        "plateforme_campagne": "Promesses ou plateforme clés de la campagne.",
+        "url_photo": profil["picture"]["large"],
+    }
 
 
-# Kafka Topics
-voters_topic = 'voters_topic'
-candidates_topic = 'candidates_topic'
+def construire_votant(profil):
+    """Transforme un profil randomuser.me en votant.
 
-if __name__ == "__main__":
+    Le pays et le département sont réécrits pour situer la simulation au
+    Sénégal ; le reste du profil est conservé tel quel.
+    """
+    departement = random.choice(DEPARTEMENTS)
+    return {
+        "votant_id": profil["login"]["uuid"],
+        "votant_nom": f"{profil['name']['first']} {profil['name']['last']}",
+        "date_naissance": profil["dob"]["date"],
+        "genre": profil["gender"],
+        "nationalite": profil["nat"],
+        # `id.value` est un vrai numéro d'identification national dans les
+        # profils randomuser.me, ce qui correspond à `numero_registre`.
+        "numero_registre": profil["id"].get("value") or profil["login"]["uuid"],
+        "adresse": {
+            "rue": f"{profil['location']['street']['number']} {profil['location']['street']['name']}",
+            "ville": departement,
+            "region": REGION_PAR_DEPARTEMENT[departement],
+            "pays": "Sénégal",
+            "code_postal": str(profil["location"]["postcode"]),
+        },
+        "email": profil["email"],
+        "numero_tel": profil["phone"],
+        "photo": profil["picture"]["large"],
+        "age_enregistre": profil["registered"]["age"],
+    }
+
+
+def inserer_candidats(connexion, candidats):
+    with connexion.cursor() as curseur:
+        execute_values(
+            curseur,
+            """
+            INSERT INTO candidats
+                (candidat_id, candidat_nom, parti, biographie,
+                 plateforme_campagne, url_photo)
+            VALUES %s
+            ON CONFLICT (candidat_id) DO NOTHING
+            """,
+            [
+                (c["candidat_id"], c["candidat_nom"], c["parti"],
+                 c["biographie"], c["plateforme_campagne"], c["url_photo"])
+                for c in candidats
+            ],
+        )
+    connexion.commit()
+
+
+def inserer_votants(connexion, votants):
+    """Insère les votants en une seule requête.
+
+    `ON CONFLICT DO NOTHING` rend le script rejouable : relancer `main.py` sur
+    une base déjà remplie n'échoue plus sur la clé primaire.
+    """
+    with connexion.cursor() as curseur:
+        execute_values(
+            curseur,
+            """
+            INSERT INTO votants
+                (votant_id, votant_nom, date_naissance, genre, nationalite,
+                 numero_registre, adresse_rue, adresse_ville, adresse_region,
+                 adresse_pays, adresse_postal, email, numero_tel, photo,
+                 age_enregistre)
+            VALUES %s
+            ON CONFLICT (votant_id) DO NOTHING
+            """,
+            [
+                (v["votant_id"], v["votant_nom"], v["date_naissance"], v["genre"],
+                 v["nationalite"], v["numero_registre"], v["adresse"]["rue"],
+                 v["adresse"]["ville"], v["adresse"]["region"], v["adresse"]["pays"],
+                 v["adresse"]["code_postal"], v["email"], v["numero_tel"],
+                 v["photo"], v["age_enregistre"])
+                for v in votants
+            ],
+        )
+    connexion.commit()
+
+
+def compte_rendu_livraison(erreur, message):
+    """Rappel de livraison Kafka : ne journalise que les échecs."""
+    if erreur is not None:
+        journal.error("Échec de l'envoi du message : %s", erreur)
+
+
+def main():
     try:
-        # Connexion à la base de données
-        connexion = psycopg2.connect(host="localhost", database="voting", user="postgres", password="patron")
+        connexion = config.connexion_postgres()
+    except psycopg2.OperationalError as erreur:
+        journal.error(
+            "Connexion à PostgreSQL impossible sur %s:%s — le conteneur est-il "
+            "démarré ? (`docker compose up -d`)\n%s",
+            config.POSTGRES["host"], config.POSTGRES["port"], erreur,
+        )
+        return 1
 
-        # Création d'un curseur pour exécuter des requêtes SQL
-        cursor = connexion.cursor()
+    config.garantir_sujets(journal)
+    producteur = Producer({"bootstrap.servers": config.KAFKA_SERVEURS})
 
-        producer = SerializingProducer({'bootstrap.servers': 'localhost:9092', })
-        create_table(connexion, cursor)
+    try:
+        creer_tables(connexion)
+        journal.info("Tables PostgreSQL prêtes")
 
-        cursor.execute("""
-            SELECT * FROM candidats
-        """)
+        with connexion.cursor() as curseur:
+            curseur.execute("SELECT count(*) FROM candidats")
+            nb_candidats_existants = curseur.fetchone()[0]
 
-        candidats = cursor.fetchall()
-        #print(candidats)
-
-        if len(candidats) == 0:
-            for i in range(3):
-                candidat = generate_candidate_data(i, 3)
-                print(candidat['candidat_id'])
-                cursor.execute("""
-                            INSERT INTO candidats (candidat_id, candidat_nom, partie, biographie, platforme_campagne, url_photo)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (
-                    candidat['candidat_id'], candidat['candidat_nom'], candidat['partie'],
-                    candidat['biographie'], candidat['platforme_campagne'], candidat['url_photo']))
-                connexion.commit()
-
-        for i in range(1000-1):
-            voter_data = generate_voter_data()
-            insert_voters(connexion, cursor, voter_data)
-            print(voter_data["votant_nom"], i)
-            producer.produce(
-                voters_topic,
-                key=voter_data["votant_id"],
-                value=json.dumps(voter_data),
-                on_delivery=delivery_report
+        if nb_candidats_existants == 0:
+            profils = recuperer_profils(config.NB_CANDIDATS)
+            candidats = [
+                construire_candidat(profil, numero)
+                for numero, profil in enumerate(profils)
+            ]
+            inserer_candidats(connexion, candidats)
+            journal.info("%d candidats créés", len(candidats))
+        else:
+            journal.info(
+                "%d candidats déjà en base, génération ignorée",
+                nb_candidats_existants,
             )
 
-            # print('Produced voter {}, data: {}'.format(i, voter_data))
-            producer.flush()
+        profils = recuperer_profils(config.NB_VOTANTS)
+        votants = [construire_votant(profil) for profil in profils]
 
-    except Exception as e:
-        print(e)
+        inserer_votants(connexion, votants)
+        journal.info("%d votants insérés en base", len(votants))
+
+        for votant in votants:
+            producteur.produce(
+                config.SUJET_VOTANTS,
+                key=votant["votant_id"],
+                value=json.dumps(votant),
+                on_delivery=compte_rendu_livraison,
+            )
+            # `poll(0)` traite les rappels de livraison sans bloquer.
+            # Un `flush()` par message, comme dans la version initiale,
+            # sérialise les envois et effondre le débit.
+            producteur.poll(0)
+
+        restants = producteur.flush(timeout=60)
+        if restants:
+            journal.warning("%d messages non confirmés par Kafka", restants)
+        journal.info(
+            "%d votants publiés sur le sujet %s",
+            len(votants) - restants, config.SUJET_VOTANTS,
+        )
+    finally:
+        connexion.close()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

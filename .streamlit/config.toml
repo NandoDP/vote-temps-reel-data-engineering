@@ -1,0 +1,13 @@
+# Theme du tableau de bord. Sans ce fichier, Streamlit suit le theme systeme
+# du navigateur, ce qui rend les captures d'ecran inconsistantes.
+
+[theme]
+base = "dark"
+primaryColor = "#4F95C6"
+backgroundColor = "#1A1A1A"
+secondaryBackgroundColor = "#262626"
+textColor = "#FAFAFA"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

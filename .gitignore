@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Environnement local : contient le mot de passe PostgreSQL.
+# Le modele a versionner est .env.example
+.env
+
+# Etat de Spark Structured Streaming, regenere a chaque execution
+checkpoints/
+spark-warehouse/
+
+# Pilote JDBC : resolu par spark.jars.packages, ne plus versionner
+postgresql-*.jar
+
+# Jeux de donnees volumineux (plusieurs centaines de Mo)
+datasets/
+*.xlsx
+
+# Travail en cours sur les legislatives senegalaises 2024 (donnees reelles).
+# Volontairement hors du depot : ce projet-ci demontre la chaine de streaming
+# sur donnees synthetiques, et ces fichiers dependent de donnees non publiees.
+app_senegal_legislatives.py
+utils.py
+utils2.py
+scrapping.py
+get_data.py
+Liste_coalitions.csv
+Liste_coalition.csv
+carte.svg
+test.html
+
+# Divers
+.DS_Store
+.idea/
+.vscode/

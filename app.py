@@ -1,219 +1,321 @@
+"""Étape 4 du pipeline : tableau de bord temps réel.
+
+Consomme les deux sujets Kafka d'agrégats produits par `spark-streaming.py`,
+complète avec les compteurs de PostgreSQL, et rafraîchit l'affichage
+périodiquement.
+
+Usage :
+    streamlit run app.py
+"""
+
 import time
+import uuid
+from contextlib import closing
+
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import simplejson as json
 import psycopg2
+import simplejson as json
 import streamlit as st
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer
 from streamlit_autorefresh import st_autorefresh
 
-def create_kafka_consumer(topic_name):
-    # Configurer un consommateur Kafka avec un sujet et des configurations spécifiés
-    consumer = KafkaConsumer(
-        topic_name,
-        bootstrap_servers='localhost:9092',
-        auto_offset_reset='earliest',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8')))
-    return consumer
+import config
 
-@st.cache_data
-def fetch_voting_stats():
-    connexion = psycopg2.connect(host="localhost", database="voting", user="postgres", password="patron")
-    cursor = connexion.cursor()
+# Backend sans fenêtre : Streamlit rend les figures en image, il n'y a pas
+# d'interface graphique disponible côté serveur.
+matplotlib.use("Agg")
 
-    # Recuperer le nombre total de votants
-    cursor.execute("""
-        SELECT count(*) voters_count FROM votants
-    """)
-    voters_count = cursor.fetchone()[0]
+# Les graphiques doivent s'accorder au thème sombre défini dans
+# `.streamlit/config.toml`, sinon ils apparaissent comme des rectangles blancs.
+plt.style.use("dark_background")
+FOND_GRAPHIQUE = "#1A1A1A"
+plt.rcParams.update({
+    "figure.facecolor": FOND_GRAPHIQUE,
+    "axes.facecolor": FOND_GRAPHIQUE,
+    "savefig.facecolor": FOND_GRAPHIQUE,
+    "axes.edgecolor": "#555555",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "text.color": "#FAFAFA",
+    "axes.labelcolor": "#BBBBBB",
+    "xtick.color": "#BBBBBB",
+    "ytick.color": "#BBBBBB",
+})
 
-    # Recuperer le nombre total de candidats
-    cursor.execute("""
-        SELECT count(*) candidates_count FROM candidats
-    """)
-    candidates_count = cursor.fetchone()[0]
+st.set_page_config(
+    page_title="Élections en temps réel",
+    page_icon="🗳️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-    return voters_count, candidates_count
-
-def fetch_data_from_kafka(consumer):
-    # Interroger le consommateur Kafka pour les messages dans un délai d'attente
-    messages = consumer.poll(timeout_ms=1000)
-    data = []
-
-    # Extraire les données des messages reçus
-    for message in messages.values():
-        for sub_message in message:
-            data.append(sub_message.value)
-    return data
+# Durée maximale de lecture d'un sujet Kafka, en secondes.
+DUREE_LECTURE_KAFKA = 8.0
 
 
-# Fonction pour diviser une trame de données en morceaux
-@st.cache_data(show_spinner=False)
-def split_frame(input_df, rows):
-    df = [input_df.loc[i: i + rows - 1, :] for i in range(0, len(input_df), rows)]
-    return df
+def format_milliers(nombre):
+    """3391 -> « 3 391 » : espace insécable comme séparateur, usage français."""
+    return f"{int(nombre):,}".replace(",", " ")
 
-# Fonction pour paginer un tableau
-def paginate_table(table_data):
-    top_menu = st.columns(3)
-    with top_menu[0]:
-        sort = st.radio("Sort Data", options=["Yes", "No"], horizontal=1, index=1)
-    if sort == "Yes":
-        with top_menu[1]:
-            sort_field = st.selectbox("Sort By", options=table_data.columns)
-        with top_menu[2]:
-            sort_direction = st.radio(
-                "Direction", options=["⬆️", "⬇️"], horizontal=True
+
+def lire_sujet(sujet):
+    """Lit l'intégralité d'un sujet Kafka et retourne les messages décodés.
+
+    Un identifiant de groupe neuf à chaque appel, combiné à
+    `auto.offset.reset=earliest`, garantit de relire tout le sujet : les
+    agrégats sont publiés en mode `update`, donc l'état courant se reconstruit
+    à partir de l'ensemble des messages.
+    """
+    consommateur = Consumer({
+        "bootstrap.servers": config.KAFKA_SERVEURS,
+        "group.id": f"tableau-de-bord-{uuid.uuid4()}",
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,
+    })
+    messages = []
+    try:
+        consommateur.subscribe([sujet])
+        debut = time.monotonic()
+        sondages_vides = 0
+        while time.monotonic() - debut < DUREE_LECTURE_KAFKA:
+            message = consommateur.poll(timeout=1.0)
+            if message is None:
+                # Deux sondages vides d'affilée : le sujet est épuisé.
+                sondages_vides += 1
+                if sondages_vides >= 2:
+                    break
+                continue
+            if message.error():
+                continue
+            sondages_vides = 0
+            try:
+                messages.append(json.loads(message.value().decode("utf-8")))
+            except (ValueError, UnicodeDecodeError):
+                continue
+    finally:
+        # Sans fermeture explicite, chaque rafraîchissement laissait un
+        # consommateur et son fil de fond derrière lui.
+        consommateur.close()
+    return messages
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def compteurs_postgres():
+    """Nombre de votants et de candidats en base.
+
+    Le cache est limité à dix secondes : la version initiale mettait ces
+    compteurs en cache indéfiniment sur un tableau de bord temps réel.
+    """
+    # `closing` est indispensable : le gestionnaire de contexte natif de
+    # psycopg2 valide la transaction mais ne ferme pas la connexion, ce qui
+    # en accumulerait une par rafraichissement.
+    with closing(config.connexion_postgres()) as connexion:
+        with connexion.cursor() as curseur:
+            curseur.execute("SELECT count(*) FROM votants")
+            nb_votants = curseur.fetchone()[0]
+            curseur.execute("SELECT count(*) FROM candidats")
+            nb_candidats = curseur.fetchone()[0]
+            curseur.execute("SELECT count(*) FROM votes")
+            nb_votes = curseur.fetchone()[0]
+    return nb_votants, nb_candidats, nb_votes
+
+
+def graphique_barres(resultats):
+    figure, axes = plt.subplots(figsize=(6, 4), facecolor=FOND_GRAPHIQUE)
+    axes.set_facecolor(FOND_GRAPHIQUE)
+    couleurs = plt.cm.viridis(np.linspace(0, 1, len(resultats)))
+    axes.bar(resultats["candidat_nom"], resultats["total_votes"], color=couleurs)
+    axes.set_xlabel("Candidat")
+    axes.set_ylabel("Total des votes")
+    axes.set_title("Nombre de votes par candidat")
+    axes.tick_params(axis="x", labelrotation=20)
+    for etiquette in axes.get_xticklabels():
+        etiquette.set_horizontalalignment("right")
+    figure.tight_layout()
+    return figure
+
+
+def graphique_anneau(resultats):
+    figure, axes = plt.subplots(figsize=(6, 4), facecolor=FOND_GRAPHIQUE)
+    axes.set_facecolor(FOND_GRAPHIQUE)
+    tranches, _, _ = axes.pie(
+        resultats["total_votes"],
+        autopct="%1.1f %%",
+        pctdistance=0.78,
+        # Les tranches du jeu de couleurs sont claires : un texte blanc y
+        # devenait illisible.
+        textprops={"color": "#1A1A1A", "fontweight": "bold"},
+        startangle=90,
+        counterclock=False,
+        wedgeprops={"width": 0.42},
+    )
+    axes.axis("equal")
+    axes.set_title("Répartition des votes")
+    # Légende plutôt qu'étiquettes collées aux tranches, qui chevauchaient le
+    # titre dès que les noms de candidats étaient longs.
+    axes.legend(
+        tranches, resultats["candidat_nom"],
+        loc="center left", bbox_to_anchor=(0.98, 0.5), frameon=False,
+    )
+    figure.tight_layout()
+    return figure
+
+
+def afficher_tableau_pagine(donnees, cle):
+    """Affiche un tableau paginé, avec tri optionnel."""
+    haut = st.columns(3)
+    with haut[0]:
+        trier = st.radio(
+            "Trier", options=["Non", "Oui"], horizontal=True, key=f"tri-{cle}"
+        )
+    if trier == "Oui":
+        with haut[1]:
+            colonne = st.selectbox(
+                "Trier par", options=donnees.columns, key=f"colonne-{cle}"
             )
-        table_data = table_data.sort_values(
-            by=sort_field, ascending=sort_direction == "⬆️", ignore_index=True
+        with haut[2]:
+            sens = st.radio(
+                "Sens", options=["Croissant", "Décroissant"],
+                horizontal=True, key=f"sens-{cle}",
+            )
+        donnees = donnees.sort_values(
+            by=colonne, ascending=sens == "Croissant", ignore_index=True
         )
-    pagination = st.container()
 
-    bottom_menu = st.columns((4, 1, 1))
-    with bottom_menu[2]:
-        batch_size = st.selectbox("Page Size", options=[10, 25, 50, 100])
-    with bottom_menu[1]:
-        total_pages = (
-            int(len(table_data) / batch_size) if int(len(table_data) / batch_size) > 0 else 1
+    zone_tableau = st.container()
+    bas = st.columns((4, 1, 1))
+    with bas[2]:
+        taille_page = st.selectbox(
+            "Lignes par page", options=[10, 25, 50, 100], key=f"taille-{cle}"
         )
-        current_page = st.number_input(
-            "Page", min_value=1, max_value=total_pages, step=1
+    with bas[1]:
+        nb_pages = max(1, -(-len(donnees) // taille_page))  # division arrondie au sup.
+        page = st.number_input(
+            "Page", min_value=1, max_value=nb_pages, step=1, key=f"page-{cle}"
         )
-    with bottom_menu[0]:
-        st.markdown(f"Page **{current_page}** of **{total_pages}** ")
+    with bas[0]:
+        st.markdown(f"Page **{page}** sur **{nb_pages}**")
 
-    pages = split_frame(table_data, batch_size)
-    pagination.dataframe(data=pages[current_page - 1], use_container_width=True)
-
-
-def update_data():
-    # Espace réservé pour afficher l'heure du dernier rafraîchissement
-    last_refresh = st.empty()
-    last_refresh.text(f"Dernière actualisation le: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    voters_count, candidates_count = fetch_voting_stats()
-
-    # Afficher les statistiques
-    st.markdown("""---""")
-    col1, col2 = st.columns(2)
-    col1.metric("Total votants", voters_count)
-    col2.metric("Total Candidats", candidates_count)
-
-    # Récupérer les données de Kafka sur les votes agrégés par candidat
-    consumer = create_kafka_consumer("aggregated_votes_per_candidate")
-    data = fetch_data_from_kafka(consumer)
-    results = pd.DataFrame(data)
-
-    # Identifier le candidat leader
-    results = results.loc[results.groupby('candidat_id')['total_votes'].idxmax()]
-    leading_candidate = results.loc[results['total_votes'].idxmax()]
-
-    # Afficher les infos sur le candidat leader
-    st.markdown("""---""")
-    st.header('Leading Candidate')
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(leading_candidate['url_photo'], width=200)
-    with col2:
-        st.header(leading_candidate['candidat_nom'])
-        st.subheader(leading_candidate['partie'])
-        st.subheader("Total Vote: {}".format(leading_candidate['total_votes']))
-
-    # Visualisation des stats
-    st.markdown("""---""")
-    st.header('Statistics')
-    results = results[['candidat_id', 'candidat_nom', 'partie', 'total_votes']]
-    results = results.reset_index(drop=True)
-    col1, col2 = st.columns(2)
-
-    # Afficher un graphique à barres et un graphique en anneau
-    with col1:
-        bar_fig = plot_colored_bar_chart(results)
-        st.pyplot(bar_fig)
-
-    with col2:
-        donut_fig = plot_donut_chart(results, title='Vote Distribution')
-        st.pyplot(donut_fig)
-
-    # Afficher le tableau avec les statistiques des candidats
-    st.table(results)
-
-    # Récupérer des données de Kafka sur la participation agrégée par emplacement
-    location_consumer = create_kafka_consumer("aggregated_turnout_by_location")
-    location_data = fetch_data_from_kafka(location_consumer)
-    location_result = pd.DataFrame(location_data)
-
-    # Identifiez les regions avec une participation maximale
-    location_result = location_result.loc[location_result.groupby('region')['count'].idxmax()]
-    location_result = location_result.reset_index(drop=True)
-
-    # Display location-based voter information with pagination
-    st.header("Lacalisation des votants")
-    paginate_table(location_result)
-
-    # Update the last refresh time
-    st.session_state['last_update'] = time.time()
+    debut = (page - 1) * taille_page
+    zone_tableau.dataframe(
+        donnees.iloc[debut:debut + taille_page],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
-def plot_colored_bar_chart(results):
-    data_type = results['candidat_nom']
-    colors = plt.cm.viridis(np.linspace(0, 1, len(data_type)))
-    plt.bar(data_type, results['total_votes'], color=colors)
-    plt.xlabel('Candidat')
-    plt.ylabel('Votes Total')
-    plt.title('Nombre de votes par candidat')
-    plt.xticks(rotation=90)
-    return plt
+def afficher_tableau_de_bord():
+    st.title("Tableau de bord des élections en temps réel")
+    st.caption(
+        f"Dernière actualisation : {time.strftime('%Y-%m-%d %H:%M:%S')} — "
+        "données synthétiques, scrutin simulé"
+    )
 
-# Function to plot a donut chart for vote distribution
-def plot_donut_chart(data: pd.DataFrame, title='Donut Chart', type='candidat'):
-    if type == 'candidat':
-        labels = list(data['candidat_nom'])
-    elif type == 'genre':
-        labels = list(data['genre'])
+    try:
+        nb_votants, nb_candidats, nb_votes = compteurs_postgres()
+    except psycopg2.Error as erreur:
+        st.error(
+            f"PostgreSQL injoignable sur {config.POSTGRES['host']}:"
+            f"{config.POSTGRES['port']}. Les conteneurs sont-ils démarrés "
+            f"(`docker compose up -d`) ?\n\n{erreur}"
+        )
+        return
 
-    sizes = list(data['total_votes'])
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
-    ax.axis('equal')
-    plt.title(title)
-    return fig
+    colonnes = st.columns(3)
+    colonnes[0].metric("Votants inscrits", format_milliers(nb_votants))
+    colonnes[1].metric("Candidats", nb_candidats)
+    colonnes[2].metric("Votes enregistrés", format_milliers(nb_votes))
 
-# Function to plot a pie chart for vote distribution
-def plot_pie_chart(data, title='Répartition par sexe des électeurs', labels=None):
-    sizes = list(data.values())
-    if labels is None:
-        labels = list(data.keys())
+    st.divider()
 
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
-    ax.axis('equal')
-    plt.title(title)
-    return fig
+    donnees_candidats = lire_sujet(config.SUJET_VOTES_PAR_CANDIDAT)
+    if not donnees_candidats:
+        st.info(
+            "Aucun agrégat sur le sujet "
+            f"`{config.SUJET_VOTES_PAR_CANDIDAT}` pour le moment. "
+            "Vérifier que `voting.py` et `spark-streaming.py` tournent ; "
+            "les premiers agrégats apparaissent après quelques secondes."
+        )
+        return
+
+    resultats = pd.DataFrame(donnees_candidats)
+    # Les agrégats sont publiés en mode `update` : plusieurs messages existent
+    # par candidat, le total le plus élevé est le plus récent.
+    resultats = resultats.loc[
+        resultats.groupby("candidat_id")["total_votes"].idxmax()
+    ].reset_index(drop=True)
+    resultats = resultats.sort_values("total_votes", ascending=False)
+
+    tete = resultats.iloc[0]
+    st.subheader("Candidat en tête")
+    gauche, droite = st.columns([1, 3])
+    with gauche:
+        if tete.get("url_photo"):
+            st.image(tete["url_photo"], width=160)
+    with droite:
+        st.markdown(f"### {tete['candidat_nom']}")
+        st.markdown(f"**{tete['parti']}**")
+        st.markdown(f"**{format_milliers(tete['total_votes'])} votes**")
+
+    st.divider()
+    st.subheader("Statistiques")
+
+    gauche, droite = st.columns(2)
+    with gauche:
+        figure = graphique_barres(resultats)
+        st.pyplot(figure)
+        plt.close(figure)  # sinon les figures s'accumulent à chaque rafraîchissement
+    with droite:
+        figure = graphique_anneau(resultats)
+        st.pyplot(figure)
+        plt.close(figure)
+
+    tableau_candidats = resultats[["candidat_nom", "parti", "total_votes"]].copy()
+    tableau_candidats["total_votes"] = tableau_candidats["total_votes"].map(
+        format_milliers
+    )
+    st.dataframe(
+        tableau_candidats.rename(columns={
+            "candidat_nom": "Candidat",
+            "parti": "Parti",
+            "total_votes": "Total des votes",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("Participation par région")
+
+    donnees_regions = lire_sujet(config.SUJET_PARTICIPATION_PAR_REGION)
+    if not donnees_regions:
+        st.info("Pas encore d'agrégat de participation par région.")
+        return
+
+    participation = pd.DataFrame(donnees_regions)
+    participation = participation.loc[
+        participation.groupby("region")["total_votes"].idxmax()
+    ].reset_index(drop=True)
+    participation = participation.sort_values(
+        "total_votes", ascending=False, ignore_index=True
+    )
+    participation = participation.rename(
+        columns={"region": "Région", "total_votes": "Votes"}
+    )
+
+    afficher_tableau_pagine(participation, cle="regions")
 
 
+intervalle = st.sidebar.slider(
+    "Intervalle d'actualisation (secondes)", min_value=10, max_value=60, value=15
+)
+st_autorefresh(interval=intervalle * 1000, key="actualisation")
+st.sidebar.caption(
+    "Le tableau de bord relit les sujets Kafka d'agrégats à chaque "
+    "actualisation."
+)
 
-# Sidebar layout
-def sidebar():
-    # Initialize last update time if not present in session state
-    if st.session_state.get('last_update') is None:
-        st.session_state['last_update'] = time.time()
-
-    # Slider to control refresh interval
-    refresh_interval = st.sidebar.slider("Intervalle d'actualisation (secondes)", 5, 60, 10)
-    st_autorefresh(interval=refresh_interval * 1000, key="auto")
-
-    # Button to manually refresh data
-    if st.sidebar.button('Actualiser les données'):
-        update_data()
-
-
-st.title('Tableau de bord des élections en temps réel')
-topic_name = 'aggregated_votes_per_candidate'
-
-# Display sidebar
-sidebar()
-
-update_data()
+afficher_tableau_de_bord()

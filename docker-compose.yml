@@ -1,8 +1,13 @@
-version: '3'
+# Infrastructure du pipeline : bus de messages et base de données.
+#
+# Spark n'apparaît pas ici : le job `spark-streaming.py` tourne en `local[*]`
+# via PySpark, sur la machine hôte. Voir « Limites connues » dans le README.
+#
+# Les mots de passe sont lus depuis `.env` (voir `.env.example`).
 
 services:
-  # Configure un service Zookeeper, garantissant qu'il est
-  # correctement configuré et surveillé pour son état de santé.
+  # Zookeeper, avec healthcheck : le broker Kafka ne démarre qu'une fois
+  # Zookeeper déclaré sain, ce qui évite les échecs de démarrage en cascade.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     hostname: zookeeper
@@ -18,12 +23,14 @@ services:
       timeout: 5s
       retries: 5
 
-  # configure un service de courtier Kafka,
-  # garantissant qu'il est correctement configuré et que
-  # le service dépendant (Zookeeper) est sain avant de démarrer.
-  # Il fournit également des configurations pour la surveillance et le reporting des métriques.
+  # Broker Kafka. Deux écouteurs sont déclarés : `broker:29092` pour les
+  # échanges entre conteneurs, `localhost:9092` pour les scripts Python
+  # lancés depuis la machine hôte — c'est celui qu'utilise le pipeline.
+  #
+  # `cp-kafka` et non `cp-server` : l'image entreprise pèse le double (1,7 Go
+  # contre 845 Mo) pour des fonctions que ce projet n'utilise pas.
   broker:
-    image: confluentinc/cp-server:7.4.0
+    image: confluentinc/cp-kafka:7.4.0
     hostname: broker
     container_name: broker
     depends_on:
@@ -37,56 +44,31 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
-      #KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_JMX_PORT: 9101
       KAFKA_JMX_HOSTNAME: localhost
-      #KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      #CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
-      #CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
-      #CONFLUENT_METRICS_ENABLE: 'false'
-      #CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
     healthcheck:
       test: [ "CMD", "bash", "-c", 'nc -z localhost 9092' ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-
   postgres:
     image: postgres:14.0
     container_name: postgres
+    # PostgreSQL écoute sur 5432 dans le conteneur. On l'expose sur 5433 côté
+    # hôte pour ne pas entrer en conflit avec une installation locale.
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=voting
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-voting}
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-postgres}", "-d", "${POSTGRES_DB:-voting}"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-  spark-master:
-    image: bitnami/spark:latest
-    command: bin/spark-class org.apache.spark.deploy.master.Master
-    ports:
-      - "9090:8080"
-      - "7077:7077"
-
-  spark-worker:
-    image: bitnami/spark:latest
-    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
-    depends_on:
-      - spark-master
-    environment:
-      SPARK_MODE: worker
-      SPARK_WORKER_CORES: 2
-      SPARK_WORKER_MEMORY: 1g
-      SPARK_MASTER_URL: spark://spark-master:7077
