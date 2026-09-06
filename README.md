@@ -160,6 +160,10 @@ La latence mesure le trajet complet `voters_topic` → `voting.py` → PostgreSQ
 premier sujet, et l'on chronomètre l'arrivée de la mise à jour d'agrégat correspondante,
 pipeline au repos.
 
+**Démarrage à froid** : le premier agrégat suivant le lancement de `spark-streaming.py` met
+nettement plus longtemps — une douzaine de secondes, le temps que la requête initialise son
+état depuis le point de reprise. Les mesures ci-dessus portent sur un pipeline déjà chaud.
+
 **Ce que le tableau de bord affiche en plus** : il relit les sujets d'agrégats à chaque
 actualisation, ce qui ajoute la lecture des sujets (jusqu'à 8 s) et l'intervalle
 d'actualisation choisi (10 à 60 s, 15 s par défaut). Le délai perçu à l'écran est donc de
@@ -203,6 +207,7 @@ playwright`, volontairement hors de `requirements.txt`).</sub>
 | `Aucun candidat en base` au lancement de `voting.py` | `main.py` n'a pas été exécuté |
 | `UnsatisfiedLinkError: NativeIO$Windows.access0` (Windows) | `hadoop.dll` introuvable. Installer `winutils.exe` et `hadoop.dll` dans `%HADOOP_HOME%in` — `spark-streaming.py` ajoute ce répertoire au `PATH` de lui-même, mais les fichiers doivent exister |
 | Spark reste bloqué au premier lancement | Ivy télécharge le connecteur Kafka depuis Maven Central : compter une minute et un accès réseau |
+| `RpcEndpointNotFoundException` après une mise en veille | L'adresse IP de la machine a changé sous Spark. Le pilote est lié à `127.0.0.1` pour éviter cela ; si le cas survient malgré tout, relancer `spark-streaming.py` — le point de reprise permet de repartir sans perte |
 
 ## Pistes d'extension
 

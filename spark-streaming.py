@@ -119,6 +119,13 @@ def creer_session():
         .appName("AnalyseElection")
         .master("local[*]")  # exécution locale, tous les cœurs disponibles
         .config("spark.jars.packages", CONNECTEUR_KAFKA)
+        # En `local[*]` il n'y a aucun exécuteur distant à joindre : on lie le
+        # pilote à la boucle locale. Par défaut Spark le lie à l'adresse IP de
+        # la machine sur le réseau, et le job meurt si cette adresse change —
+        # mise en veille, changement de Wi-Fi, bail DHCP renouvelé — sur un
+        # `RpcEndpointNotFoundException` incompréhensible.
+        .config("spark.driver.host", "localhost")
+        .config("spark.driver.bindAddress", "127.0.0.1")
         # Les horodatages sont émis en UTC par `voting.py` ; sans cette ligne
         # Spark les interpréterait dans le fuseau de la machine.
         .config("spark.sql.session.timeZone", "UTC")
@@ -225,6 +232,7 @@ def main():
         config.SUJET_VOTES_PAR_CANDIDAT, config.SUJET_PARTICIPATION_PAR_REGION,
     )
 
+    code_sortie = 0
     try:
         # `awaitAnyTermination` rend la main dès qu'une requête s'arrête. La
         # version initiale attendait les requêtes l'une après l'autre : l'échec
@@ -232,13 +240,25 @@ def main():
         spark.streams.awaitAnyTermination()
     except KeyboardInterrupt:
         journal.info("Arrêt demandé")
+    except Exception as erreur:
+        journal.error("Une agrégation s'est arrêtée en erreur : %s", erreur)
+        code_sortie = 1
     finally:
+        # La JVM peut avoir disparu avant qu'on arrive ici — passerelle py4j
+        # perdue, machine mise en veille. Sans ces gardes, l'arrêt lève à son
+        # tour et la trace py4j masque la cause réelle de la panne.
         for requete in requetes:
-            if requete.isActive:
-                requete.stop()
-        spark.stop()
+            try:
+                if requete.isActive:
+                    requete.stop()
+            except Exception:
+                pass
+        try:
+            spark.stop()
+        except Exception:
+            pass
 
-    return 0
+    return code_sortie
 
 
 if __name__ == "__main__":
