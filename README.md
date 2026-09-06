@@ -195,6 +195,11 @@ playwright`, volontairement hors de `requirements.txt`).</sub>
 - Les garanties de livraison sont **« au moins une fois »** : les offsets étant validés par
   paquets de cent, un redémarrage de `voting.py` peut rejouer jusqu'à cent votants. Les
   contraintes du schéma absorbent ces doublons.
+- **L'écriture en base et la publication Kafka ne sont pas atomiques.** `voting.py` enregistre
+  le vote, puis le publie. Un arrêt brutal entre les deux laisse un vote présent en base mais
+  jamais publié : au redémarrage, le `ON CONFLICT` le considère déjà traité et ne le republie
+  pas. Le tableau de bord afficherait alors un total d'agrégats inférieur au décompte en base.
+  Le risque est faible et la fenêtre étroite, mais elle existe.
 - **Pas de tests automatisés.**
 
 ## Dépannage
@@ -205,16 +210,79 @@ playwright`, volontairement hors de `requirements.txt`).</sub>
 | Spark échoue au démarrage avec une erreur Java | JDK trop récent — Spark 3.5 exige un JDK 8, 11 ou 17 |
 | Le tableau de bord affiche « Aucun agrégat » | `spark-streaming.py` n'a pas encore produit ; compter une quinzaine de secondes après son démarrage |
 | `Aucun candidat en base` au lancement de `voting.py` | `main.py` n'a pas été exécuté |
-| `UnsatisfiedLinkError: NativeIO$Windows.access0` (Windows) | `hadoop.dll` introuvable. Installer `winutils.exe` et `hadoop.dll` dans `%HADOOP_HOME%in` — `spark-streaming.py` ajoute ce répertoire au `PATH` de lui-même, mais les fichiers doivent exister |
+| `UnsatisfiedLinkError: NativeIO$Windows.access0` (Windows) | `hadoop.dll` introuvable. Installer `winutils.exe` et `hadoop.dll` dans le sous-répertoire `bin` de `HADOOP_HOME` — `spark-streaming.py` ajoute ce répertoire au `PATH` de lui-même, mais les fichiers doivent exister |
 | Spark reste bloqué au premier lancement | Ivy télécharge le connecteur Kafka depuis Maven Central : compter une minute et un accès réseau |
 | `RpcEndpointNotFoundException` après une mise en veille | L'adresse IP de la machine a changé sous Spark. Le pilote est lié à `127.0.0.1` pour éviter cela ; si le cas survient malgré tout, relancer `spark-streaming.py` — le point de reprise permet de repartir sans perte |
 
-## Pistes d'extension
+## Perspectives
 
-- Remplacer les votants synthétiques par un **jeu de données réel** (données démographiques
-  publiques sénégalaises, par exemple).
-- Ajouter une **vraie agrégation en fenêtre** (`window` + filigrane) à côté des totaux cumulés,
-  pour restituer un rythme de vote et non seulement un cumul.
-- Passer Spark en **mode cluster** pour démontrer le passage à l'échelle.
-- Ajouter des **tests** sur les schémas des sujets Kafka et sur les transformations.
-- Remplacer Zookeeper par **KRaft**, le mode sans Zookeeper de Kafka.
+Par ordre de ce que chaque chantier apporterait. Les trois premiers répondent aux faiblesses
+que je vois moi-même dans ce dépôt : elles sont nommées ici plutôt que laissées à découvrir.
+
+### 1. Des tests et une intégration continue
+
+C'est ce qui manque le plus, et c'est le moins coûteux. Les parties les plus testables sont
+justement celles qui ne le sont pas : la table département vers région (les 45 départements
+retombent-ils bien sur 14 régions ?), `construire_votant`, la désérialisation d'un message
+malformé, l'idempotence d'un rejeu.
+
+Deux préalables concrets :
+
+- renommer `spark-streaming.py` en `spark_streaming.py` — le tiret le rend non importable,
+  donc non testable ;
+- extraire les agrégations dans des fonctions prenant un `DataFrame` en argument, ce qui
+  permet de les vérifier sur un jeu statique, sans Kafka ni flux.
+
+Puis un workflow GitHub Actions qui lance `pytest` et un `ruff check`. Un dépôt de streaming
+sans un seul test se voit immédiatement, et « comment testez-vous un pipeline en continu ? »
+est une question d'entretien courante.
+
+### 2. Conteneuriser les scripts, pas seulement l'infrastructure
+
+Aujourd'hui `docker compose` ne couvre que Kafka, Zookeeper et PostgreSQL. Le code, lui,
+exige de la machine hôte un Python, un JDK d'une version précise, et sous Windows
+`winutils.exe` et `hadoop.dll`. C'est une conteneurisation à moitié faite.
+
+Un `Dockerfile` pour les scripts Python, ajouté au `compose`, ramènerait le démarrage à une
+seule commande et supprimerait la moitié de la section « Dépannage » ci-dessus — y compris
+l'amorce Windows de `spark-streaming.py`, qui n'aurait plus lieu d'être.
+
+### 3. Lever le goulot d'étranglement mesuré
+
+Les mesures désignent le coupable : un `INSERT` suivi d'un `COMMIT` par vote, soit un
+aller-retour PostgreSQL à chaque événement, qui plafonne le débit autour de 60 votes/s.
+Regrouper les écritures par lots (`execute_values`, déjà utilisé dans `main.py`) le
+relèverait nettement.
+
+La contrepartie est réelle et mérite d'être mesurée plutôt que supposée : on perd la
+granularité de l'enregistrement, et un arrêt brutal coûte un lot entier au lieu d'un vote.
+L'intérêt de l'exercice est là — chiffrer le gain et le risque, pas choisir à l'aveugle.
+
+### Rendre la chaîne plus rigoureuse
+
+- **Agrégation en fenêtre** (`window` et filigrane) à côté des totaux cumulés, pour restituer
+  un rythme de vote et non seulement un cumul. C'est aussi ce qui donnerait enfin un rôle au
+  filigrane, inutile sur une agrégation globale.
+- **Schema Registry et Avro** à la place du `StructType` écrit à la main. Aujourd'hui un
+  message malformé produit une ligne nulle, écartée par un filtre ; un registre de schémas
+  rendrait le contrat explicite et versionné.
+- **Rendre atomiques l'écriture et la publication** — voir la limite décrite plus haut. Un
+  motif *outbox*, où la publication Kafka découle d'une table de sortie alimentée dans la même
+  transaction que le vote, supprimerait la fenêtre de perte.
+- **KRaft** à la place de Zookeeper : un conteneur de moins, et le mode vers lequel Kafka a
+  convergé.
+- **Observabilité** : un `StreamingQueryListener` exposant durée de micro-lot et débit
+  d'entrée, plutôt que de déduire l'état du pipeline en comptant des lignes en base.
+
+### Changer la nature de l'exercice
+
+- **Mettre l'architecture à l'épreuve.** À la charge actuelle — 3 clés candidat, 14 clés
+  région, 60 votes/s — Kafka et Spark ne sont pas nécessaires : un seul processus Python y
+  suffirait. Ce qui rendrait le choix défendable, c'est de le mettre en difficulté :
+  partitionner `voters_topic`, lancer plusieurs `voting.py` en parallèle sur le même groupe de
+  consommateurs, et mesurer si le débit suit. C'est le seul chemin qui transforme cet exercice
+  en démonstration de passage à l'échelle, et non plus seulement d'assemblage.
+- **Passer Spark en mode cluster**, une fois qu'il y a une charge qui le justifie.
+- **Remplacer les votants synthétiques par un jeu de données réel** — données démographiques
+  publiques sénégalaises, par exemple. Le pipeline resterait le même ; ce sont les questions
+  posées aux données qui deviendraient intéressantes.
