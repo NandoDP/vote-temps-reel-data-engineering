@@ -1,6 +1,6 @@
 """Étape 4 du pipeline : tableau de bord temps réel.
 
-Consomme les deux sujets Kafka d'agrégats produits par `spark-streaming.py`,
+Consomme les deux sujets Kafka d'agrégats produits par `spark_streaming.py`,
 complète avec les compteurs de PostgreSQL, et rafraîchit l'affichage
 périodiquement.
 
@@ -236,7 +236,7 @@ def afficher_tableau_de_bord():
         st.info(
             "Aucun agrégat sur le sujet "
             f"`{config.SUJET_VOTES_PAR_CANDIDAT}` pour le moment. "
-            "Vérifier que `voting.py` et `spark-streaming.py` tournent ; "
+            "Vérifier que `voting.py` et `spark_streaming.py` tournent ; "
             "les premiers agrégats apparaissent après quelques secondes."
         )
         return
