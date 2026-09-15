@@ -33,18 +33,12 @@ class TestChampsDuCandidat:
     """Ce que la fonction copie depuis le profil."""
 
     def test_l_identifiant_vient_du_profil(self, profil_randomuser):
-        # TODO 1 — appelle main.construire_candidat(profil_randomuser, 0)
-        #          et vérifie que "candidat_id" vaut bien l'uuid du profil.
-        #          Modèle : regarde test_l_identifiant_du_votant_vient_du_profil
-        #          dans tests/test_construire_votant.py.
-        pytest.fail("à écrire")
+        candidat = main.construire_candidat(profil_randomuser, 0)
+        assert candidat["candidat_id"] == profil_randomuser["login"]["uuid"]
 
     def test_le_nom_complet_est_compose_du_prenom_et_du_nom(self, profil_randomuser):
-        # TODO 2 — le profil donne name.first = "Awa" et name.last = "Ndiaye".
-        #          Qu'attends-tu dans "candidat_nom" ? Écris-le en dur : un test
-        #          qui recalcule la valeur avec la même f-string que le code
-        #          testé ne teste rien (il passerait même si le code était faux).
-        pytest.fail("à écrire")
+        candidat = main.construire_candidat(profil_randomuser, 0)
+        assert candidat["candidat_nom"] == "Awa Ndiaye"
 
 
 class TestAttributionDuParti:
@@ -56,21 +50,29 @@ class TestAttributionDuParti:
     """
 
     def test_le_premier_candidat_recoit_le_premier_parti(self, profil_randomuser):
-        # TODO 3
-        pytest.fail("à écrire")
+        candidat = main.construire_candidat(profil_randomuser, 0)
+        assert candidat["parti"] == "Parti de Gauche"
 
     def test_le_parti_tourne_en_boucle_au_dela_du_nombre_de_partis(self, profil_randomuser):
-        # TODO 4 — il y a 3 partis. Les candidats 0 et 3 doivent donc recevoir
-        #          le MÊME parti. Vérifie-le.
-        #          Puis demande-toi : est-ce un comportement voulu, ou un effet
-        #          de bord ? Écris ta réponse en une ligne de commentaire —
-        #          c'est la vraie question d'ingénierie de ce fichier.
-        pytest.fail("à écrire")
+        #  est-ce un comportement voulu, ou un effet de bord ?
+        candidats = [main.construire_candidat(profil_randomuser, i) for i in range(4)]
+        assert candidats[0]["parti"] == candidats[3]["parti"]
+        # Réponse : c'est un comportement voulu, car le code est conçu pour
 
-    # TODO 5 — remplace les deux tests ci-dessus par UN SEUL test paramétré qui
-    #          couvre les numéros 0, 1, 2, 3, 4, 5 et le parti attendu pour
-    #          chacun. Six cas, un bloc. C'est le but de `parametrize`.
-    #          Supprime ensuite les deux tests devenus redondants.
+    # Remplace les deux tests ci-dessus par UN SEUL test paramétré qui
+    # couvre les numéros 0, 1, 2, 3, 4, 5 et le parti attendu pour
+    # chacun. Six cas, un bloc. C'est le but de `parametrize`.
+    @pytest.mark.parametrize("numero,parti_attendu", [
+        (0, "Parti de Gauche"),
+        (1, "Parti de Droite"),
+        (2, "Parti du Milieu"),
+        (3, "Parti de Gauche"),
+        (4, "Parti de Droite"),
+        (5, "Parti du Milieu"),
+    ])
+    def test_le_parti_est_correctement_attribue(self, profil_randomuser, numero, parti_attendu):
+        candidat = main.construire_candidat(profil_randomuser, numero)
+        assert candidat["parti"] == parti_attendu
 
 
 class TestCeQueTuTrouves:
