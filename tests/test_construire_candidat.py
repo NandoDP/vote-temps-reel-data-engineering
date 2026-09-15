@@ -23,19 +23,6 @@ class TestAttributionDuParti:
     exception — elle produit une répartition silencieusement fausse.
     """
 
-    def test_le_premier_candidat_recoit_le_premier_parti(self, profil_randomuser):
-        candidat = main.construire_candidat(profil_randomuser, 0)
-        assert candidat["parti"] == "Parti de Gauche"
-
-    def test_le_parti_tourne_en_boucle_au_dela_du_nombre_de_partis(self, profil_randomuser):
-        #  est-ce un comportement voulu, ou un effet de bord ?
-        candidats = [main.construire_candidat(profil_randomuser, i) for i in range(4)]
-        assert candidats[0]["parti"] == candidats[3]["parti"]
-        # Réponse : c'est un comportement voulu, car le code est conçu pour
-
-    # Remplace les deux tests ci-dessus par UN SEUL test paramétré qui
-    # couvre les numéros 0, 1, 2, 3, 4, 5 et le parti attendu pour
-    # chacun. Six cas, un bloc. C'est le but de `parametrize`.
     @pytest.mark.parametrize("numero,parti_attendu", [
         (0, "Parti de Gauche"),
         (1, "Parti de Droite"),
@@ -46,4 +33,16 @@ class TestAttributionDuParti:
     ])
     def test_le_parti_est_correctement_attribue(self, profil_randomuser, numero, parti_attendu):
         candidat = main.construire_candidat(profil_randomuser, numero)
+        #  est-ce un comportement voulu, ou un effet de bord ?
         assert candidat["parti"] == parti_attendu
+        # Réponse : c'est un comportement voulu, car le code est conçu pour tourner en boucle. Le modulo est là pour ça. Le test est donc légitime.
+
+
+class TestUrlPhoto:
+    """Le champ `url_photo` est un URL, mais la fonction ne le construit pas : elle
+    le copie depuis le profil. Le test vérifie juste que la copie est correcte.
+    """
+
+    def test_l_url_de_la_photo_est_copiee_depuis_le_profil(self, profil_randomuser):
+        candidat = main.construire_candidat(profil_randomuser, 0)
+        assert candidat["url_photo"] == profil_randomuser["picture"]["large"]
