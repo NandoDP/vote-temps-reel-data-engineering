@@ -7,7 +7,7 @@ cumulés, et republie chaque mise à jour sur Kafka :
   - `aggregated_turnout_by_location` : participation par région
 
 Usage :
-    python spark-streaming.py       # s'arrête avec Ctrl+C
+    python spark_streaming.py       # s'arrête avec Ctrl+C
 
 Prérequis : un JDK 8, 11 ou 17 accessible via JAVA_HOME (Spark 3.5 ne
 fonctionne pas avec un JDK plus récent). Le connecteur Kafka est téléchargé
@@ -38,7 +38,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-journal = logging.getLogger("spark-streaming")
+journal = logging.getLogger("spark_streaming")
 
 # La version du connecteur Kafka doit correspondre à celle de Spark. La dériver
 # de `pyspark.__version__` rend la dérive impossible : la version initiale

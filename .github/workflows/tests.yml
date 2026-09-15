@@ -1,0 +1,50 @@
+# Integration continue : execute la suite de tests a chaque poussee et a
+# chaque pull request visant `main`.
+#
+# L'interet n'est pas de lancer pytest — tu peux le faire en local. C'est que
+# le resultat devienne *public et date* : le badge du README montre a un
+# recruteur que les tests passent, sur une machine qui n'est pas la tienne, a
+# partir d'un depot fraichement clone. C'est la difference entre « ca marche
+# chez moi » et une preuve.
+
+name: Tests
+
+on:
+  push:
+    branches: [main, tests-et-ci]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    strategy:
+      # `fail-fast: false` laisse toutes les versions aller au bout : on veut
+      # savoir si l'echec touche une seule version de Python ou toutes.
+      fail-fast: false
+      matrix:
+        version-python: ["3.10", "3.12"]
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Installer Python ${{ matrix.version-python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.version-python }}
+          # Met en cache les paquets pip d'une execution a l'autre : sans cela,
+          # chaque lancement retelecharge tout.
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Installer les dependances de test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Executer les tests
+        # `-q` pour une sortie courte, `--strict-markers` pour qu'un marqueur
+        # pytest mal orthographie echoue au lieu d'etre ignore en silence.
+        run: pytest tests/ -q --strict-markers

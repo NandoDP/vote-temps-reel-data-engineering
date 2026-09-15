@@ -1,0 +1,17 @@
+# Dependances necessaires pour EXECUTER LES TESTS, et rien de plus.
+#
+# Pourquoi un fichier separe plutot que `-r requirements.txt` : les tests
+# unitaires ne touchent ni Spark, ni Streamlit, ni matplotlib. Les installer en
+# integration continue ajouterait plusieurs centaines de Mo de telechargement
+# et des minutes d'attente a chaque `git push`, sans rien couvrir de plus.
+#
+# Ce fichier liste donc uniquement ce que `main.py` et `voting.py` importent au
+# chargement du module — c'est ce qui conditionne la reussite d'un `import`.
+
+pytest==8.3.5
+
+confluent-kafka==2.3.0      # importe par main.py et voting.py
+psycopg2-binary==2.9.9      # importe par main.py et voting.py
+requests==2.31.0            # importe par main.py
+simplejson==3.19.2          # importe par voting.py
+python-dotenv==1.0.1        # importe par config.py

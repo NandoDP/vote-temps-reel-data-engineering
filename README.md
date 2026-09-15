@@ -1,5 +1,7 @@
 # Vote électoral en temps réel — Kafka, Spark, PostgreSQL
 
+[![Tests](https://github.com/NandoDP/vote-temps-reel-data-engineering/actions/workflows/tests.yml/badge.svg)](https://github.com/NandoDP/vote-temps-reel-data-engineering/actions/workflows/tests.yml)
+
 Pipeline de données en continu qui simule un scrutin, agrège les votes au fil de l'eau et les
 affiche sur un tableau de bord temps réel. L'infrastructure tourne en conteneurs.
 
@@ -38,7 +40,7 @@ randomuser.me  ──►  main.py          ──►  PostgreSQL  (candidats, vo
                                     ├─►  PostgreSQL  (votes)
                                     └─►  Kafka  votes_topic
                                                 │
-                          spark-streaming.py  ◄─┘
+                          spark_streaming.py  ◄─┘
                             (deux agrégations cumulées)
                                     │
                                     ├─►  Kafka  aggregated_votes_per_candidate
@@ -88,7 +90,7 @@ pip install -r requirements.txt
 python main.py
 
 # 5. Agrégation Spark en continu -> sujets agrégés
-python spark-streaming.py
+python spark_streaming.py
 
 # 6. Génération des votes -> Kafka (votes_topic)      [nouveau terminal]
 python voting.py
@@ -114,6 +116,28 @@ Tout se règle dans `.env` (voir `.env.example`) :
 | `DELAI_ENTRE_VOTES` | `0` | pause entre deux votes, en secondes. `0` = débit maximal ; `0.2` pour voir le tableau de bord se remplir lentement |
 | `TAILLE_LOT_PROFILS` | `500` | profils récupérés par requête sur `randomuser.me` |
 | `POSTGRES_*`, `KAFKA_BOOTSTRAP_SERVERS` | voir `.env.example` | connexions |
+
+## Tests
+
+60 tests unitaires, exécutés à chaque poussée par GitHub Actions sur Python 3.10 et 3.12.
+Ils tournent **sans Kafka, sans Spark et sans PostgreSQL** : la connexion à la base est
+remplacée par un double de test, et les profils `randomuser.me` par une fixture. La suite
+prend moins d'une seconde.
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -q
+```
+
+| Fichier | Ce qu'il couvre |
+|---|---|
+| `tests/test_construire_votant.py` | Réécriture de la géographie : le pays devient « Sénégal », la région découle du département et non du profil britannique d'origine. Les 45 départements sont vérifiés un par un, et les 14 régions doivent toutes être atteignables. |
+| `tests/test_idempotence_vote.py` | « Un votant ne vote qu'une fois » au rejeu Kafka : dix rejeux du même message ne produisent qu'une voix, un votant ne peut pas changer d'avis, et la transaction est validée même lorsque l'insertion est refusée. |
+
+**Ce qui n'est pas couvert** : les agrégations Spark, qui demandent d'abord d'extraire les
+`groupBy` dans des fonctions prenant un `DataFrame` en argument (voir « Perspectives ») ; et
+la justesse du SQL lui-même, qui exige une vraie base — un test d'intégration avec un
+conteneur PostgreSQL jetable, pas un test unitaire.
 
 ## Ce que le projet met en œuvre
 
@@ -160,7 +184,7 @@ La latence mesure le trajet complet `voters_topic` → `voting.py` → PostgreSQ
 premier sujet, et l'on chronomètre l'arrivée de la mise à jour d'agrégat correspondante,
 pipeline au repos.
 
-**Démarrage à froid** : le premier agrégat suivant le lancement de `spark-streaming.py` met
+**Démarrage à froid** : le premier agrégat suivant le lancement de `spark_streaming.py` met
 nettement plus longtemps — une douzaine de secondes, le temps que la requête initialise son
 état depuis le point de reprise. Les mesures ci-dessus portent sur un pipeline déjà chaud.
 
@@ -208,11 +232,11 @@ playwright`, volontairement hors de `requirements.txt`).</sub>
 |---|---|
 | `Connexion à PostgreSQL impossible` | conteneurs non démarrés (`docker compose ps`), ou `.env` absent |
 | Spark échoue au démarrage avec une erreur Java | JDK trop récent — Spark 3.5 exige un JDK 8, 11 ou 17 |
-| Le tableau de bord affiche « Aucun agrégat » | `spark-streaming.py` n'a pas encore produit ; compter une quinzaine de secondes après son démarrage |
+| Le tableau de bord affiche « Aucun agrégat » | `spark_streaming.py` n'a pas encore produit ; compter une quinzaine de secondes après son démarrage |
 | `Aucun candidat en base` au lancement de `voting.py` | `main.py` n'a pas été exécuté |
-| `UnsatisfiedLinkError: NativeIO$Windows.access0` (Windows) | `hadoop.dll` introuvable. Installer `winutils.exe` et `hadoop.dll` dans le sous-répertoire `bin` de `HADOOP_HOME` — `spark-streaming.py` ajoute ce répertoire au `PATH` de lui-même, mais les fichiers doivent exister |
+| `UnsatisfiedLinkError: NativeIO$Windows.access0` (Windows) | `hadoop.dll` introuvable. Installer `winutils.exe` et `hadoop.dll` dans le sous-répertoire `bin` de `HADOOP_HOME` — `spark_streaming.py` ajoute ce répertoire au `PATH` de lui-même, mais les fichiers doivent exister |
 | Spark reste bloqué au premier lancement | Ivy télécharge le connecteur Kafka depuis Maven Central : compter une minute et un accès réseau |
-| `RpcEndpointNotFoundException` après une mise en veille | L'adresse IP de la machine a changé sous Spark. Le pilote est lié à `127.0.0.1` pour éviter cela ; si le cas survient malgré tout, relancer `spark-streaming.py` — le point de reprise permet de repartir sans perte |
+| `RpcEndpointNotFoundException` après une mise en veille | L'adresse IP de la machine a changé sous Spark. Le pilote est lié à `127.0.0.1` pour éviter cela ; si le cas survient malgré tout, relancer `spark_streaming.py` — le point de reprise permet de repartir sans perte |
 
 ## Perspectives
 
@@ -228,8 +252,8 @@ malformé, l'idempotence d'un rejeu.
 
 Deux préalables concrets :
 
-- renommer `spark-streaming.py` en `spark_streaming.py` — le tiret le rend non importable,
-  donc non testable ;
+- ~~renommer `spark-streaming.py`~~ — fait : le module s'appelle désormais
+  `spark_streaming.py`, le tiret le rendait non importable donc non testable ;
 - extraire les agrégations dans des fonctions prenant un `DataFrame` en argument, ce qui
   permet de les vérifier sur un jeu statique, sans Kafka ni flux.
 
@@ -245,7 +269,7 @@ exige de la machine hôte un Python, un JDK d'une version précise, et sous Wind
 
 Un `Dockerfile` pour les scripts Python, ajouté au `compose`, ramènerait le démarrage à une
 seule commande et supprimerait la moitié de la section « Dépannage » ci-dessus — y compris
-l'amorce Windows de `spark-streaming.py`, qui n'aurait plus lieu d'être.
+l'amorce Windows de `spark_streaming.py`, qui n'aurait plus lieu d'être.
 
 ### 3. Lever le goulot d'étranglement mesuré
 

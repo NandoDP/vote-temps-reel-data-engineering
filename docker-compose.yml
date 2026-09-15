@@ -1,6 +1,6 @@
 # Infrastructure du pipeline : bus de messages et base de données.
 #
-# Spark n'apparaît pas ici : le job `spark-streaming.py` tourne en `local[*]`
+# Spark n'apparaît pas ici : le job `spark_streaming.py` tourne en `local[*]`
 # via PySpark, sur la machine hôte. Voir « Limites connues » dans le README.
 #
 # Les mots de passe sont lus depuis `.env` (voir `.env.example`).
