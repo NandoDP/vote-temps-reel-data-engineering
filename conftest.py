@@ -11,6 +11,31 @@ Il sert aussi à héberger les fixtures partagées par plusieurs fichiers de tes
 import pytest
 
 
+@pytest.fixture(scope="session")
+def spark():
+    """Fournit une session Spark partagée par les tests qui la demandent."""
+    import spark_streaming
+
+    session = (
+        spark_streaming.SparkSession.builder
+        .master("local[1]")
+        .appName("tests-spark")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
+
+
+def pytest_collection_modifyitems(items):
+    """Marque automatiquement les tests qui dépendent de la fixture Spark."""
+    marqueur_spark = pytest.mark.spark
+    for item in items:
+        if "spark" in item.fixturenames:
+            item.add_marker(marqueur_spark)
+
+
 @pytest.fixture
 def profil_randomuser():
     """Un profil tel que randomuser.me le renvoie, réduit aux champs utilisés.
