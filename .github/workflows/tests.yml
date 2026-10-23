@@ -11,17 +11,15 @@ name: Tests
 
 on:
   push:
-    branches: [main, tests-et-ci]
+    branches: [main, tests-et-ci, exercice-tests]
   pull_request:
     branches: [main]
 
 jobs:
-  pytest:
+  tests-rapides:
     runs-on: ubuntu-latest
 
     strategy:
-      # `fail-fast: false` laisse toutes les versions aller au bout : on veut
-      # savoir si l'echec touche une seule version de Python ou toutes.
       fail-fast: false
       matrix:
         version-python: ["3.10", "3.12"]
@@ -39,12 +37,89 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
-      - name: Installer les dependances de test
+      - name: Installer les dependances des tests rapides
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Executer les tests
-        # `-q` pour une sortie courte, `--strict-markers` pour qu'un marqueur
-        # pytest mal orthographie echoue au lieu d'etre ignore en silence.
-        run: pytest tests/ -q --strict-markers
+      - name: Executer les tests sans dependance Spark
+        run: |
+          SPARK_TEST_FILES="$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          imports_spark = {"pyspark", "spark_streaming"}
+          for path in sorted(Path("tests").glob("test_*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              uses_spark = False
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      uses_spark |= any(
+                          alias.name.split(".", 1)[0] in imports_spark
+                          for alias in node.names
+                      )
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      uses_spark |= node.module.split(".", 1)[0] in imports_spark
+                  elif (
+                      isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and node.name.startswith("test_")
+                  ):
+                      args = (
+                          node.args.posonlyargs
+                          + node.args.args
+                          + node.args.kwonlyargs
+                      )
+                      uses_spark |= any(arg.arg == "spark" for arg in args)
+              if uses_spark:
+                  print(path.as_posix())
+          PY
+          )"
+          SPARK_TEST_FILES_ARRAY=()
+          while IFS= read -r test_file; do
+            if [[ -n "$test_file" ]]; then
+              SPARK_TEST_FILES_ARRAY+=("$test_file")
+            fi
+          done <<< "$SPARK_TEST_FILES"
+          printf 'Excluding Spark-dependent tests: %s\n' "${SPARK_TEST_FILES_ARRAY[*]}"
+          IGNORE_ARGS=()
+          for test_file in "${SPARK_TEST_FILES_ARRAY[@]}"; do
+            IGNORE_ARGS+=(--ignore="$test_file")
+          done
+          pytest tests/ -q "${IGNORE_ARGS[@]}"
+
+  tests-spark:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # PySpark 3.5.0 est exécuté sur la version minimale supportée du projet
+        # en attendant de confirmer sa compatibilité avec Python 3.12.
+        version-python: ["3.10"]
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v7
+
+      - name: Installer Python ${{ matrix.version-python }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.version-python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-spark.txt
+
+      - name: Installer Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Installer les dependances des tests Spark
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-spark.txt
+
+      - name: Executer les tests Spark et le contrat de schema
+        run: pytest tests/ -q -m spark

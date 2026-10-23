@@ -119,25 +119,32 @@ Tout se règle dans `.env` (voir `.env.example`) :
 
 ## Tests
 
-60 tests unitaires, exécutés à chaque poussée par GitHub Actions sur Python 3.10 et 3.12.
-Ils tournent **sans Kafka, sans Spark et sans PostgreSQL** : la connexion à la base est
-remplacée par un double de test, et les profils `randomuser.me` par une fixture. La suite
-prend moins d'une seconde.
+Les tests rapides et les tests dépendant de PySpark sont exécutés dans deux jobs GitHub
+Actions. Le job rapide teste Python 3.10 et 3.12 ; le job Spark utilise Python 3.10, en
+attendant de confirmer la compatibilité de PySpark 3.5.0 avec Python 3.12. Le job rapide
+n'installe pas PySpark ; les tests Spark et le contrat de schéma sont isolés dans le job
+dédié. Les tests unitaires n'utilisent ni Kafka ni PostgreSQL : la connexion à la base est
+remplacée par un double de test, et les profils `randomuser.me` par une fixture.
 
 ```bash
+# Suite complete (tests rapides et tests PySpark)
 pip install -r requirements-dev.txt
+pip install -r requirements-spark.txt
 pytest tests/ -q
 ```
+
+Dans GitHub Actions, le job rapide calcule les fichiers à exclure à partir de
+leurs imports PySpark et de leurs paramètres de fixture `spark`. Le job Spark
+sélectionne les tests marqués `spark`; les tests de contrat de schéma sont
+inclus dans ce groupe car ils importent le schéma PySpark, sans démarrer de JVM.
 
 | Fichier | Ce qu'il couvre |
 |---|---|
 | `tests/test_construire_votant.py` | Réécriture de la géographie : le pays devient « Sénégal », la région découle du département et non du profil britannique d'origine. Les 45 départements sont vérifiés un par un, et les 14 régions doivent toutes être atteignables. |
 | `tests/test_idempotence_vote.py` | « Un votant ne vote qu'une fois » au rejeu Kafka : dix rejeux du même message ne produisent qu'une voix, un votant ne peut pas changer d'avis, et la transaction est validée même lorsque l'insertion est refusée. |
 
-**Ce qui n'est pas couvert** : les agrégations Spark, qui demandent d'abord d'extraire les
-`groupBy` dans des fonctions prenant un `DataFrame` en argument (voir « Perspectives ») ; et
-la justesse du SQL lui-même, qui exige une vraie base — un test d'intégration avec un
-conteneur PostgreSQL jetable, pas un test unitaire.
+**Ce qui n'est pas couvert** : la justesse du SQL lui-même, qui exige une vraie base — un
+test d'intégration avec un conteneur PostgreSQL jetable, pas un test unitaire.
 
 ## Ce que le projet met en œuvre
 
