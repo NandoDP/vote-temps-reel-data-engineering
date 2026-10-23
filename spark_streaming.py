@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pyspark
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json
+from pyspark.sql.functions import col, count, from_json
 from pyspark.sql.functions import sum as somme
 from pyspark.sql.types import (
     IntegerType,
@@ -135,8 +135,24 @@ def creer_session():
     )
 
 
+def deserialiser_votes(df):
+    """Désérialise et filtre un DataFrame dont ``value`` contient le JSON."""
+    votes = (
+        df.selectExpr("CAST(value AS STRING) AS json")
+        .select(from_json(col("json"), SCHEMA_VOTE).alias("donnees"))
+        .select("donnees.*")
+    )
+
+    # `from_json` ne valide rien : un message malformé produit une ligne
+    # entièrement nulle, qui polluerait silencieusement les agrégats. On écarte
+    # donc ce qui n'a pas les deux champs indispensables.
+    return votes.filter(
+        col("votant_id").isNotNull() & col("candidat_id").isNotNull()
+    )
+
+
 def lire_votes(spark):
-    """Flux des votes, désérialisés et débarrassés des messages invalides."""
+    """Lit le flux Kafka puis délègue son traitement à ``deserialiser_votes``."""
     brut = (
         spark.readStream
         .format("kafka")
@@ -149,18 +165,7 @@ def lire_votes(spark):
         .load()
     )
 
-    votes = (
-        brut.selectExpr("CAST(value AS STRING) AS json")
-        .select(from_json(col("json"), SCHEMA_VOTE).alias("donnees"))
-        .select("donnees.*")
-    )
-
-    # `from_json` ne valide rien : un message malformé produit une ligne
-    # entièrement nulle, qui polluerait silencieusement les agrégats. On écarte
-    # donc ce qui n'a pas les deux champs indispensables.
-    return votes.filter(
-        col("votant_id").isNotNull() & col("candidat_id").isNotNull()
-    )
+    return deserialiser_votes(brut)
 
 
 def ecrire_sur_kafka(df, sujet, nom_checkpoint):
@@ -182,6 +187,26 @@ def ecrire_sur_kafka(df, sujet, nom_checkpoint):
     )
 
 
+def calculer_votes_par_candidat(votes):
+    """Compte les votes cumulés pour chaque candidat."""
+    # Agrégats cumulés depuis le début du flux, sans fenêtre temporelle :
+    # le tableau de bord affiche un total courant, pas une tranche de temps.
+    # L'état reste borné parce que les clés de regroupement sont peu nombreuses
+    # (autant que de candidats, puis que de régions).
+    return votes.groupBy(
+        "candidat_id", "candidat_nom", "parti", "url_photo"
+    ).agg(somme("vote").alias("total_votes"))
+
+
+def calculer_participation_par_region(votes):
+    """Compte les bulletins cumulés pour chaque région."""
+    # Chaque ligne filtrée est un bulletin, pas une valeur à pondérer.
+    return (
+        votes.groupBy(col("adresse.region").alias("region"))
+        .agg(count("*").alias("total_votes"))
+    )
+
+
 def main():
     # Doit précéder la création de la session : le PATH est lu au lancement de
     # la JVM.
@@ -197,22 +222,9 @@ def main():
 
     votes = lire_votes(spark)
 
-    # Agrégats cumulés depuis le début du flux, sans fenêtre temporelle :
-    # le tableau de bord affiche un total courant, pas une tranche de temps.
-    # L'état reste borné parce que les clés de regroupement sont peu nombreuses
-    # (autant que de candidats, puis que de régions).
-    votes_par_candidat = votes.groupBy(
-        "candidat_id", "candidat_nom", "parti", "url_photo"
-    ).agg(somme("vote").alias("total_votes"))
+    votes_par_candidat = calculer_votes_par_candidat(votes)
 
-    # `.count()` nomme sa colonne « count » ; la version initiale appelait
-    # `.alias("total_votes")` sur le DataFrame, ce qui renomme le jeu de
-    # données et non la colonne — le champ publié restait « count ».
-    participation_par_region = (
-        votes.groupBy(col("adresse.region").alias("region"))
-        .count()
-        .withColumnRenamed("count", "total_votes")
-    )
+    participation_par_region = calculer_participation_par_region(votes)
 
     requetes = [
         ecrire_sur_kafka(
