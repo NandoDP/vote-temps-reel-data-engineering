@@ -8,7 +8,36 @@ qui vivent à la racine et non dans un paquet installable.
 Il sert aussi à héberger les fixtures partagées par plusieurs fichiers de test.
 """
 
+import importlib.util
+from pathlib import Path
+
 import pytest
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Ignore les tests Spark si leur dépendance n'est pas installée."""
+    repertoire_spark = Path(__file__).parent / "tests" / "spark"
+    chemin = Path(str(collection_path))
+    if chemin == repertoire_spark or repertoire_spark in chemin.parents:
+        return importlib.util.find_spec("pyspark") is None
+    return None
+
+
+@pytest.fixture(scope="session")
+def spark():
+    """Fournit une session Spark partagée par les tests qui la demandent."""
+    import spark_streaming
+
+    session = (
+        spark_streaming.SparkSession.builder
+        .master("local[1]")
+        .appName("tests-spark")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
 
 
 @pytest.fixture

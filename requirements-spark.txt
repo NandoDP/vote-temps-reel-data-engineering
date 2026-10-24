@@ -1,0 +1,4 @@
+# Dependances des tests qui importent PySpark.
+# Ce fichier herite des dependances de la suite rapide et ajoute PySpark.
+-r requirements-dev.txt
+pyspark==3.5.0
