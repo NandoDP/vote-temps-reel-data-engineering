@@ -133,10 +133,10 @@ pip install -r requirements-spark.txt
 pytest tests/ -q
 ```
 
-Dans GitHub Actions, le job rapide calcule les fichiers à exclure à partir de
-leurs imports PySpark et de leurs paramètres de fixture `spark`. Le job Spark
-sélectionne les tests marqués `spark`; les tests de contrat de schéma sont
-inclus dans ce groupe car ils importent le schéma PySpark, sans démarrer de JVM.
+Dans GitHub Actions, les deux jobs exécutent la même commande. Le `conftest.py`
+ignore `tests/spark/` pendant la collecte uniquement si PySpark n'est pas installé;
+le job Spark, qui l'installe, exécute donc la suite complète. Cette configuration
+évite à la fois les exclusions maintenues à la main et les angles morts entre jobs.
 
 | Fichier | Ce qu'il couvre |
 |---|---|

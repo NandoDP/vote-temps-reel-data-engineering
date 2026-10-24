@@ -8,7 +8,19 @@ qui vivent à la racine et non dans un paquet installable.
 Il sert aussi à héberger les fixtures partagées par plusieurs fichiers de test.
 """
 
+import importlib.util
+from pathlib import Path
+
 import pytest
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Ignore les tests Spark si leur dépendance n'est pas installée."""
+    repertoire_spark = Path(__file__).parent / "tests" / "spark"
+    chemin = Path(str(collection_path))
+    if chemin == repertoire_spark or repertoire_spark in chemin.parents:
+        return importlib.util.find_spec("pyspark") is None
+    return None
 
 
 @pytest.fixture(scope="session")
@@ -26,14 +38,6 @@ def spark():
     )
     yield session
     session.stop()
-
-
-def pytest_collection_modifyitems(items):
-    """Marque automatiquement les tests qui dépendent de la fixture Spark."""
-    marqueur_spark = pytest.mark.spark
-    for item in items:
-        if "spark" in item.fixturenames:
-            item.add_marker(marqueur_spark)
 
 
 @pytest.fixture

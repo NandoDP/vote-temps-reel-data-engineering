@@ -42,50 +42,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Executer les tests sans dependance Spark
-        run: |
-          SPARK_TEST_FILES="$(python - <<'PY'
-          import ast
-          from pathlib import Path
-
-          imports_spark = {"pyspark", "spark_streaming"}
-          for path in sorted(Path("tests").glob("test_*.py")):
-              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-              uses_spark = False
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.Import):
-                      uses_spark |= any(
-                          alias.name.split(".", 1)[0] in imports_spark
-                          for alias in node.names
-                      )
-                  elif isinstance(node, ast.ImportFrom) and node.module:
-                      uses_spark |= node.module.split(".", 1)[0] in imports_spark
-                  elif (
-                      isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and node.name.startswith("test_")
-                  ):
-                      args = (
-                          node.args.posonlyargs
-                          + node.args.args
-                          + node.args.kwonlyargs
-                      )
-                      uses_spark |= any(arg.arg == "spark" for arg in args)
-              if uses_spark:
-                  print(path.as_posix())
-          PY
-          )"
-          SPARK_TEST_FILES_ARRAY=()
-          while IFS= read -r test_file; do
-            if [[ -n "$test_file" ]]; then
-              SPARK_TEST_FILES_ARRAY+=("$test_file")
-            fi
-          done <<< "$SPARK_TEST_FILES"
-          printf 'Excluding Spark-dependent tests: %s\n' "${SPARK_TEST_FILES_ARRAY[*]}"
-          IGNORE_ARGS=()
-          for test_file in "${SPARK_TEST_FILES_ARRAY[@]}"; do
-            IGNORE_ARGS+=(--ignore="$test_file")
-          done
-          pytest tests/ -q "${IGNORE_ARGS[@]}"
+      - name: Executer tous les tests disponibles sans PySpark
+        run: pytest tests/ -q
 
   tests-spark:
     runs-on: ubuntu-latest
@@ -121,5 +79,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-spark.txt
 
-      - name: Executer les tests Spark et le contrat de schema
-        run: pytest tests/ -q -m spark
+      - name: Executer tous les tests avec PySpark
+        run: pytest tests/ -q

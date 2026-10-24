@@ -27,9 +27,6 @@ import main
 import spark_streaming
 
 
-pytestmark = pytest.mark.spark
-
-
 @pytest.fixture
 def message_publie(profil_randomuser):
     """Le message tel que `voting.py` le publie sur `votes_topic`.
